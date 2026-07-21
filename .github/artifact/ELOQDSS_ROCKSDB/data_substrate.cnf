@@ -11,10 +11,10 @@ enable_mvcc=true
 logserver_snapshot_interval=60
 
 [cluster]
-ip_port_list=127.0.0.1:16379
+tx_ip_port_list=127.0.0.1:16379
+#txlog_service_list=127.0.0.1:9000
+#txlog_group_replica_num=1
 
 [store]
-# Max number of open files used by eloqstore(default: 1024)
-eloq_store_open_files_limit=40960
-eloq_store_buffer_pool_size=500MB
-eloq_store_pages_per_file_shift=11
+# Local RocksDB store, reached through dss_server. Storage settings live in the
+# dss_server config, not here.

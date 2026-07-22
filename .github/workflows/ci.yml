@@ -70,27 +70,6 @@ jobs:
           - id: eloqstore_s3
             data_store_type: ELOQDSS_ELOQSTORE
             log_state: ROCKSDB_CLOUD_S3
-        exclude:
-          # Debug rocks_s3 amd64 currently hangs beyond the jstest timeout on
-          # hosted runners. Runtime coverage remains in Debug arm64 and both
-          # RelWithDebInfo arches; build coverage remains in Build Validation.
-          - build_type: Debug
-            arch: amd64
-            engine:
-              id: rocks_s3
-              data_store_type: ELOQDSS_ROCKSDB_CLOUD_S3
-              log_state: ROCKSDB_CLOUD_S3
-
-          # Debug eloqstore_s3 arm64 currently exhausts the hosted runner disk while
-          # running jstests; arm64 build coverage remains in Build Validation and
-          # runtime coverage remains in RelWithDebInfo.
-          - build_type: Debug
-            arch: arm64
-            engine:
-              id: eloqstore_s3
-              data_store_type: ELOQDSS_ELOQSTORE
-              log_state: ROCKSDB_CLOUD_S3
-
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 240
     container:
@@ -105,8 +84,6 @@ jobs:
       CMAKE_INCLUDE_PATH: /opt/eloq/third_party/include
       CMAKE_LIBRARY_PATH: /opt/eloq/third_party/lib
       LD_LIBRARY_PATH: /opt/eloq/third_party/lib:/opt/eloq/third_party/lib64
-      SCONS_CACHE_DIR: ${{ github.workspace }}/scons-cache
-      SCONS_CACHE_SIZE_GB: 2
       CMAKE_BUILD_TIMEOUT_SECONDS: 3600
       SCONS_BUILD_TIMEOUT_SECONDS: 7200
       TPCC_TIMEOUT_SECONDS: 1200
@@ -146,14 +123,6 @@ jobs:
           source-dir: ${{ github.workspace }}/eloqdoc
           arch: ${{ matrix.arch }}
           cache-scope: ubuntu-dev
-
-      - name: Restore SCons cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/scons-cache
-          key: eloqdoc-scons-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.event.pull_request.head.sha || github.sha }}
-          restore-keys: |
-            eloqdoc-scons-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Configure CI runtime
         run: |

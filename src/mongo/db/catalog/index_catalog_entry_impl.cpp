@@ -50,6 +50,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -397,25 +398,29 @@ void IndexCatalogEntryImpl::setMultikey(OperationContext* opCtx,
     const bool indexMetadataHasChanged =
         _collection->setIndexIsMultikey(opCtx, _descriptor->indexName(), paths);
 
-    // When the recovery unit commits, update the multikey paths if needed and clear the plan cache
-    // if the index metadata has changed.
-    opCtx->recoveryUnit()->onCommit(
-        [this, multikeyPaths, indexMetadataHasChanged](boost::optional<Timestamp>) {
-            _isMultikey.store(true);
+    // Eloq refreshes the cached Collection while committing catalog metadata, before RecoveryUnit
+    // callbacks run. The refreshed entry already reflects the committed multikey metadata, so the
+    // callback below must not retain the old IndexCatalogEntry.
+    if (storageGlobalParams.engine != "eloq") {
+        opCtx->recoveryUnit()->onCommit(
+            [this, multikeyPaths, indexMetadataHasChanged](boost::optional<Timestamp>) {
+                _isMultikey.store(true);
 
-            if (_indexTracksPathLevelMultikeyInfo) {
-                // stdx::lock_guard<stdx::mutex> lk(_indexMultikeyPathsMutex);
-                for (size_t i = 0; i < multikeyPaths.size(); ++i) {
-                    _indexMultikeyPaths[i].insert(multikeyPaths[i].begin(), multikeyPaths[i].end());
+                if (_indexTracksPathLevelMultikeyInfo) {
+                    // stdx::lock_guard<stdx::mutex> lk(_indexMultikeyPathsMutex);
+                    for (size_t i = 0; i < multikeyPaths.size(); ++i) {
+                        _indexMultikeyPaths[i].insert(multikeyPaths[i].begin(),
+                                                      multikeyPaths[i].end());
+                    }
                 }
-            }
 
-            if (indexMetadataHasChanged && _infoCache) {
-                LOG(1) << _ns << ": clearing plan cache - index " << _descriptor->keyPattern()
-                       << " set to multi key.";
-                _infoCache->clearQueryCache();
-            }
-        });
+                if (indexMetadataHasChanged && _infoCache) {
+                    LOG(1) << _ns << ": clearing plan cache - index "
+                           << _descriptor->keyPattern() << " set to multi key.";
+                    _infoCache->clearQueryCache();
+                }
+            });
+    }
 
     // Keep multikey changes in memory to correctly service later reads using this index.
     auto session = OperationContextSession::get(opCtx);

@@ -906,6 +906,11 @@ Status EloqRecordStore::updateRecord(OperationContext* opCtx,
     uint64_t pkeySchemaVersion = table._schema->KeySchema()->SchemaTs();
 
     mongoRecord->SetEncodedBlob(reinterpret_cast<const unsigned char*>(data), len);
+    const BSONObj idObj = getIdBSONObjWithoutFieldName(recordObj);
+    const KeyString idKeyString(KeyString::kLatestVersion, idObj, kIdOrdering);
+    if (const auto& typeBits = idKeyString.getTypeBits(); !typeBits.isAllZeros()) {
+        mongoRecord->SetUnpackInfo(typeBits.getBuffer(), typeBits.getSize());
+    }
     auto err = ru->setKV(_tableName,
                          pkeySchemaVersion,
                          std::move(mongoKey),

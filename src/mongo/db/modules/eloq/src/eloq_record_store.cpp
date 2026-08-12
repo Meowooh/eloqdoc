@@ -129,6 +129,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    // Catalog scans are fully prefetched at construction and are never stashed across wire
+    // operations today; if one ever is (a future catalog cursor surviving a getMore), these
+    // MONGO_UNREACHABLEs abort the process -- implement the save/restore contract like
+    // EloqRecordStoreCursor's (close at save, lazy re-seek at next use) before allowing that.
     void save() override {
         MONGO_UNREACHABLE;
     }
@@ -224,8 +228,17 @@ void EloqCatalogRecordStore::deleteRecord(OperationContext* opCtx, const RecordI
     for (uint16_t i = 1; i < kMaxRetryLimit; ++i) {
         auto [exist, errorCode] = ru->readCatalog(catalogKey, catalogRecord, true);
         if (errorCode != txservice::TxErrorCode::NO_ERROR) {
-            MONGO_LOG(1) << "Eloq readCatalog error with write intent. Another transaction "
-                            "may do DDL on the same table.";
+            // A conflict must leave this loop and abort the transaction, so the
+            // catalog read lock this transaction holds is released and the
+            // competing DDL can upgrade its write intent. Retrying here holds
+            // that lock for the whole retry budget and can wedge both sides.
+            // Retry belongs at the command layer, which owns the transaction.
+            ThrowIfWriteConflict(errorCode);
+            // Transient errors -- most importantly READ_CATALOG_FAIL, which
+            // means "the catalog entry is not resident, a fetch has been
+            // issued, try again" -- stay in the loop below.
+            MONGO_LOG(1) << "Eloq readCatalog error with write intent: "
+                         << txservice::TxErrorMessage(errorCode);
         } else {
             if (!exist) {
                 return;
@@ -282,16 +295,16 @@ StatusWith<RecordId> EloqCatalogRecordStore::insertRecord(
 
     auto [exist, errorCode] = ru->readCatalog(catalogKey, catalogRecord, true);
     if (errorCode != txservice::TxErrorCode::NO_ERROR) {
-        if (errorCode == txservice::TxErrorCode::WRITE_WRITE_CONFLICT) {
-            MONGO_LOG(1) << "Eloq readCatalog error with write intent. Another transaction "
-                            "may do DDL on the same table.";
-            return {ErrorCodes::WriteConflict,
-                    "[Create Table] Another transaction may do DDL on the same table"};
-        } else {
-            MONGO_LOG(0) << "Eloq readCatalog error with write intent."
-                         << txservice::TxErrorMessage(errorCode);
-            return {ErrorCodes::InternalError, txservice::TxErrorMessage(errorCode)};
-        }
+        // The whole conflict group has to leave as a WriteConflictException. Returning a
+        // Status carrying ErrorCodes::WriteConflict looks equivalent but is not: at the
+        // first uassertStatusOK it becomes ExceptionFor<ErrorCodes::WriteConflict>, a
+        // sibling type that no writeConflictRetry catches. The previous form also mapped
+        // DEAD_LOCK_ABORT and UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL to InternalError,
+        // which no caller retries at all.
+        ThrowIfWriteConflict(errorCode);
+        MONGO_LOG(0) << "Eloq readCatalog error with write intent."
+                     << txservice::TxErrorMessage(errorCode);
+        return {ErrorCodes::InternalError, txservice::TxErrorMessage(errorCode)};
     } else {
         if (exist) {
             const char* msg = "Collection already exists in Eloq storage engine";
@@ -345,8 +358,11 @@ Status EloqCatalogRecordStore::updateRecord(OperationContext* opCtx,
     for (uint16_t i = 1; i < kMaxRetryLimit; ++i) {
         auto [exist, errorCode] = ru->readCatalog(catalogKey, catalogRecord, true);
         if (errorCode != txservice::TxErrorCode::NO_ERROR) {
-            MONGO_LOG(1) << "Eloq readCatalog error with write intent. Another transaction "
-                            "may do DDL on the same table.";
+            // See deleteRecord for why a conflict must not be retried here.
+            ThrowIfWriteConflict(errorCode);
+            // Transient errors stay in the loop below.
+            MONGO_LOG(1) << "Eloq readCatalog error with write intent: "
+                         << txservice::TxErrorMessage(errorCode);
         } else {
             if (!exist) {
                 return {ErrorCodes::InternalError, "Try to Update a non-exist table"};
@@ -531,6 +547,14 @@ public:
     void detachFromOperationContext() override {
         MONGO_LOG(1) << "EloqRecordStoreCursor::detachFromOperationContext";
         assert(_opCtx);
+        // Close the scan here rather than in save(): detach is the point where the cursor
+        // leaves its operation, so this is the last moment the transaction that opened the
+        // scan is still live. A stashed cursor would otherwise keep an EloqCursor bound to
+        // that txm, which is recycled once the transaction commits, and its next batch
+        // request would land on a foreign transaction's queue. save() must not do this --
+        // DeleteStage saves state once per deleted document, so closing there costs one
+        // scan close and re-seek per document. next() re-seeks from _lastMongoKey.
+        _cursor.reset();
         _opCtx = nullptr;
         _ru = nullptr;
     }

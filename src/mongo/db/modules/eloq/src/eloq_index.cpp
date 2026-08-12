@@ -218,6 +218,14 @@ public:
     void detachFromOperationContext() override {
         MONGO_LOG(1) << "EloqIndexCursor::detachFromOperationContext";
         assert(_opCtx);
+        // Close the scan here rather than in save(): detach is the point where the cursor
+        // leaves its operation, so this is the last moment the transaction that opened the
+        // scan is still live. A stashed cursor would otherwise keep an EloqCursor bound to
+        // that txm, which is recycled once the transaction commits, and its next batch
+        // request would land on a foreign transaction's queue. save() must not do this --
+        // DeleteStage saves state once per deleted document, so closing there costs one
+        // scan close and re-seek per document. restore() re-seeks exclusively after '_key'.
+        _cursor.reset();
         _opCtx = nullptr;
         _ru = nullptr;
     }

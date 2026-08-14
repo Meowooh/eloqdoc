@@ -38,6 +38,10 @@
 
 namespace mongo {
 
+class OperationContext;
+
+enum class WriteConflictRetryBackoff { kUninterruptible, kInterruptible };
+
 /**
  * This is thrown if during a write, two or more operations conflict with each other.
  * For example if two operations get the same version of a document, and then both try to
@@ -56,6 +60,15 @@ public:
     static void logAndBackoff(int attempt, StringData operation, StringData ns);
 
     /**
+     * Equivalent to logAndBackoff(), but sleeps through the OperationContext so coroutine-backed
+     * service executors yield their worker and operation deadlines remain observable.
+     */
+    static void logAndBackoff(OperationContext* opCtx,
+                              int attempt,
+                              StringData operation,
+                              StringData ns);
+
+    /**
      * If true, will call printStackTrace on every WriteConflictException created.
      * Can be set via setParameter named traceWriteConflictExceptions.
      */
@@ -69,14 +82,20 @@ private:
  * Runs the argument function f as many times as needed for f to complete or throw an exception
  * other than WriteConflictException.  For each time f throws a WriteConflictException, logs the
  * error, waits a spell, cleans up, and then tries f again.  Imposes no upper limit on the number
- * of times to re-try f, so any required timeout behavior must be enforced within f.
+ * of times to re-try f, so any required timeout behavior must be enforced within f. Callers that
+ * opt into kInterruptible backoff may also observe an interrupt while waiting between attempts.
  *
  * If we are already in a WriteUnitOfWork, we assume that we are being called within a
  * WriteConflictException retry loop up the call stack. Hence, this retry loop is reduced to an
  * invocation of the argument function f without any exception handling and retry logic.
  */
 template <typename F>
-auto writeConflictRetry(OperationContext* opCtx, StringData opStr, StringData ns, F&& f) {
+auto writeConflictRetry(
+    OperationContext* opCtx,
+    StringData opStr,
+    StringData ns,
+    F&& f,
+    WriteConflictRetryBackoff backoff = WriteConflictRetryBackoff::kUninterruptible) {
     invariant(opCtx);
     invariant(opCtx->lockState());
     invariant(opCtx->recoveryUnit());
@@ -97,7 +116,11 @@ auto writeConflictRetry(OperationContext* opCtx, StringData opStr, StringData ns
             // for the whole backoff window, starving the winner it is about to retry against;
             // abandoning first hands the winner the backoff window to finish.
             opCtx->recoveryUnit()->abandonSnapshot();
-            WriteConflictException::logAndBackoff(attempts, opStr, ns);
+            if (backoff == WriteConflictRetryBackoff::kInterruptible) {
+                WriteConflictException::logAndBackoff(opCtx, attempts, opStr, ns);
+            } else {
+                WriteConflictException::logAndBackoff(attempts, opStr, ns);
+            }
             ++attempts;
         }
     }

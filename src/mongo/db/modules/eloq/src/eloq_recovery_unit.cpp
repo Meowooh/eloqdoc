@@ -947,10 +947,11 @@ void EloqRecoveryUnit::putUnreadyTable(const txservice::TableName& tableName, co
     const bool hadPreviousValue = iter != _unreadyTableMap.end();
 
     if (_inUnitOfWork) {
-        registerChange(new RestoreUnreadyTablePutChange{&_unreadyTableMap,
-                                                        tableName,
-                                                        hadPreviousValue,
-                                                        hadPreviousValue ? iter->second : BSONObj{}});
+        registerChange(
+            new RestoreUnreadyTablePutChange{&_unreadyTableMap,
+                                             tableName,
+                                             hadPreviousValue,
+                                             hadPreviousValue ? iter->second : BSONObj{}});
     }
     _unreadyTableMap.insert_or_assign(tableName, obj.getOwned());
 }
